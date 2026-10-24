@@ -1,16 +1,20 @@
 
 import os
 import re
+import time
 
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
+from google.genai.errors import ServerError
 from google.genai import types
 
 
 load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Gemma 4 model
 MODEL_NAME = "gemma-4-26b-a4b-it"
 
 
@@ -28,7 +32,9 @@ st.markdown(
     """
     <style>
     .stApp {
-        background: linear-gradient(135deg, #f0fdf4, #ffffff 55%, #ecfdf5);
+        background: linear-gradient(
+            135deg, #f0fdf4, #ffffff 55%, #ecfdf5
+        );
     }
 
     .block-container {
@@ -124,7 +130,8 @@ with st.sidebar:
         """
         1. 📸 Upload a waste image.
         2. 🤖 Let Gemma 4 analyze it.
-        3. 🌱 Read your recycling guide.
+        3. ♻️ Get recycling guidance.
+        4. 🪴 Discover creative reuse ideas.
         """
     )
 
@@ -144,8 +151,10 @@ st.markdown(
     """
     <div class="hero">
         <h1>♻️ EcoSort AI</h1>
-        <p>Your smart companion for waste identification
-        and responsible recycling.</p>
+        <p>
+            Identify waste, recycle responsibly,
+            and turn waste into something useful.
+        </p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -161,7 +170,7 @@ with col1:
         <div class="feature-card">
             <div style="font-size: 2rem;">📷</div>
             <h3>Image Recognition</h3>
-            <p>Upload a photo to identify visible waste materials.</p>
+            <p>Identify visible waste materials from an image.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -172,8 +181,8 @@ with col2:
         """
         <div class="feature-card">
             <div style="font-size: 2rem;">🤖</div>
-            <h3>AI-Powered Guide</h3>
-            <p>Get recycling suggestions powered by Gemma 4.</p>
+            <h3>AI Recycling Guide</h3>
+            <p>Get material identification and disposal guidance.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -183,13 +192,14 @@ with col3:
     st.markdown(
         """
         <div class="feature-card">
-            <div style="font-size: 2rem;">🌍</div>
-            <h3>Greener Choices</h3>
-            <p>Learn practical ways to dispose of waste responsibly.</p>
+            <div style="font-size: 2rem;">🪴</div>
+            <h3>Creative Reuse Ideas</h3>
+            <p>Discover useful DIY projects made from waste items.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
 
 st.divider()
 
@@ -201,27 +211,20 @@ st.markdown(
 )
 
 st.write(
-    "Choose an image containing waste items and get a personalized "
-    "recycling guide."
+    "Upload an image to identify waste, get recycling guidance, "
+    "and discover creative ways to reuse the materials."
 )
 
 uploaded_file = st.file_uploader(
     "Upload your waste image",
     type=["jpg", "jpeg", "png"],
-    help="For best results, use a clear image with visible waste items.",
+    help="For best results, upload a clear image with visible items.",
 )
 
 
 if uploaded_file is not None:
 
-    # Clear old results when a different file is selected
-    current_file_key = (
-        uploaded_file.name,
-        uploaded_file.size,
-        uploaded_file.getvalue(),
-    )
-
-    # Use filename and size to identify the selected file
+    # Identify the selected file and clear old results if it changes
     current_file_key = (
         uploaded_file.name,
         uploaded_file.size,
@@ -258,12 +261,16 @@ if uploaded_file is not None:
 
         if not API_KEY:
             st.session_state["analysis_error"] = (
-                "GEMINI_API_KEY nahi mili. Apni .env file check karein."
+                "GEMINI_API_KEY was not found. "
+                "Check your local .env file or Streamlit Cloud secrets."
             )
 
         else:
             try:
-                client = genai.Client(api_key=API_KEY)
+                client = genai.Client(
+                    api_key=API_KEY,
+                    http_options=types.HttpOptions(timeout=60_000),
+                )
 
                 image_part = types.Part.from_bytes(
                     data=uploaded_file.getvalue(),
@@ -271,65 +278,132 @@ if uploaded_file is not None:
                 )
 
                 # ---------- AI Prompt ----------
-                prompt = (
-                    "You are EcoSort AI, an assistant that identifies visible waste "
-                    "and provides safe recycling guidance. "
+                prompt = """
+You are EcoSort AI, an assistant that identifies visible waste,
+provides responsible recycling guidance, and suggests safe creative
+reuse projects.
 
-                    "FIRST, assess the image quality and whether its contents "
-                    "can be identified confidently. "
+IMAGE CLASSIFICATION:
 
-                    "Start your response with exactly one status line: "
-                    "IMAGE_STATUS: WASTE, "
-                    "IMAGE_STATUS: NOT_WASTE, or "
-                    "IMAGE_STATUS: UNCLEAR. "
+Your response MUST begin with exactly one of these status lines:
+IMAGE_STATUS: WASTE
+IMAGE_STATUS: NOT_WASTE
+IMAGE_STATUS: UNCLEAR
 
-                    "CLASSIFICATION RULES — follow these in order: "
+The status line must be the very first line of your response.
 
-                    "1. If the image is too blurry, out of focus, too dark, "
-                    "obstructed, or too low-quality to determine confidently "
-                    "whether waste is present, use IMAGE_STATUS: UNCLEAR. "
-                    "Do not classify an unclear image as NOT_WASTE merely "
-                    "because you cannot identify any waste. "
+Follow these classification rules:
 
-                    "2. If at least one clearly identifiable discarded or waste "
-                    "item is visible, use IMAGE_STATUS: WASTE, even if people, "
-                    "flowers, animals, or useful objects are also present. "
+1. If the image is blurry, too dark, obstructed, or too unclear
+   to assess reliably, use IMAGE_STATUS: UNCLEAR.
 
-                    "3. If the image is sufficiently clear and shows people, "
-                    "flowers, plants, animals, landscapes, or other non-waste "
-                    "subjects with no visible waste, use IMAGE_STATUS: NOT_WASTE. "
+2. If at least one clearly identifiable discarded waste item is
+   visible, use IMAGE_STATUS: WASTE.
 
-                    "For NOT_WASTE, briefly explain that no visible waste was "
-                    "identified and ask the user to upload a waste image. "
+3. If the image is clear and shows no visible waste, use
+   IMAGE_STATUS: NOT_WASTE.
 
-                    "For UNCLEAR, explain that the image is too unclear to assess "
-                    "reliably and ask the user to upload a sharper, clearer image. "
-                    "Do not provide recycling advice for NOT_WASTE or UNCLEAR. "
+4. Do not assume that an object is waste just because it is old,
+   damaged, or near a person. Only classify it as waste when
+   the image provides reasonable visual evidence.
 
-                    "For WASTE, use simple English and Markdown headings. "
-                    "Discuss only waste items clearly visible in the image. "
+FOR NOT_WASTE:
+Briefly explain that no visible waste was identified and ask the
+user to upload an image containing waste. Do not give recycling
+or DIY advice.
 
-                    "For each clearly visible waste item, include its name, "
-                    "material, usual recyclability, and one safe disposal tip. "
+FOR UNCLEAR:
+Explain that the image cannot be assessed reliably and ask the
+user to upload a clearer image. Do not give recycling or DIY advice.
 
-                    "Do not list possible, hidden, or assumed items. "
-                    "Do not treat an object as waste simply because it is old, "
-                    "damaged, or visible near a person. It must be identifiable "
-                    "as discarded waste. "
+FOR WASTE:
+Use simple English and Markdown headings. Discuss only items
+that are clearly visible in the image.
 
-                    "Describe only what can actually be seen. Do not invent "
-                    "details or claim certainty when an item is unclear. "
-                    "Local recycling rules may vary. Add a short overall "
-                    "recommendation for WASTE images."
-                )
+Include these sections in this exact order:
+
+## Identified Waste Items
+
+For each clearly visible waste item, include:
+- Name
+- Material
+- Usual recyclability
+- One safe disposal tip
+
+Do not invent hidden items, materials, or visual details.
+Explain that local recycling rules may vary.
+
+## Creative Reuse Ideas
+
+This is an important feature. Suggest practical DIY projects
+that give the identified waste items a useful second life.
+
+For each suitable waste item, provide:
+
+### Project: [Creative project name]
+
+- **Waste Material:** The item being reused.
+- **Difficulty:** Easy, Medium, or Hard.
+- **Materials Needed:** List the additional materials.
+- **Steps:** Give clear, numbered instructions.
+- **Final Use:** Explain what the finished project is useful for.
+- **Safety:** Give relevant safety precautions.
+
+Choose ideas based on the actual visible items, not on assumed
+objects. Prefer affordable, beginner-friendly projects.
+
+Examples of suitable ideas:
+- Clean plastic bottle: planter, bird-free garden water container,
+  or desk organizer.
+- Plastic bottle caps: mosaic decoration or craft material.
+- Safe, smooth-edged aluminium can: pencil holder.
+- Cardboard: desk organizer, storage box, or drawer divider.
+- Clean glass jar: decorative storage container or flower vase.
+
+These examples are suggestions, not claims that these items
+are present in the image. Only recommend a project if it fits
+the visible material and item.
+
+DIY SAFETY RULES:
+- Never suggest burning, melting, or heating plastic.
+- Never suggest melting cans or other materials at home.
+- Do not recommend handling sharp metal edges or broken glass.
+- For projects involving cutting, recommend adult supervision
+  and appropriate protective equipment.
+- Avoid hazardous waste, batteries, chemical containers,
+  and electronic components for ordinary DIY crafts.
+- Do not use containers that held hazardous chemicals for crafts.
+- Do not recommend food-contact uses for materials that may be
+  contaminated or unsafe.
+- If a project cannot be made safely, suggest recycling or
+  responsible disposal instead.
+- Do not claim that all materials are recyclable everywhere.
+
+## Overall Recommendation
+
+Give one short recommendation on how to reuse, recycle, or
+responsibly dispose of the visible waste.
+
+Keep the answer organized and useful. Do not omit the required
+first-line image status. Do not provide recycling or DIY sections
+for NOT_WASTE or UNCLEAR images.
+"""
 
                 with st.spinner(
-                    "Gemma 4 is examining your image... ♻️"
+                    "Gemma 4 is examining your image. "
+                    "This may take up to a minute... ♻️"
                 ):
-                    response = client.models.generate_content(
-                        model=MODEL_NAME,
-                        contents=[image_part, prompt],
-                    )
+                    for attempt in range(2):
+                        try:
+                            response = client.models.generate_content(
+                                model=MODEL_NAME,
+                                contents=[image_part, prompt],
+                            )
+                            break
+                        except ServerError:
+                            if attempt == 1:
+                                raise
+                            time.sleep(1)
 
                 # ---------- Save AI Response ----------
                 response_text = response.text
@@ -354,7 +428,7 @@ if uploaded_file is not None:
 
         result_text = st.session_state["analysis_result"]
 
-        # Validate the status on the first line only
+        # Validate the first line only
         lines = result_text.splitlines()
         first_line = lines[0].strip() if lines else ""
 
@@ -369,38 +443,40 @@ if uploaded_file is not None:
         else:
             image_status = "UNKNOWN"
 
-        # Remove the first line only when it contains a valid status
+        # Remove the status line from the displayed response
         if status_match:
             display_text = "\n".join(lines[1:]).strip()
         else:
             display_text = result_text.strip()
 
         st.divider()
-        st.markdown("## 🌍 Your Recycling Guide")
+        st.markdown("## 🌍 Your EcoSort Results")
 
-        # ---------- Status-Specific UI ----------
+        # ---------- NOT WASTE ----------
         if image_status == "NOT_WASTE":
 
             st.info(
-                "This image does not appear to contain waste. "
-                "Upload a waste image to get recycling guidance."
+                "This image does not appear to contain visible waste. "
+                "Please upload a waste image for recycling and reuse ideas."
             )
 
             if display_text:
                 with st.container(border=True):
                     st.markdown(display_text)
 
+        # ---------- UNCLEAR ----------
         elif image_status == "UNCLEAR":
 
             st.warning(
-                "The image is unclear. Please upload a clearer image "
-                "with visible waste items."
+                "The image is unclear. Please upload a sharper image "
+                "with clearly visible items."
             )
 
             if display_text:
                 with st.container(border=True):
                     st.markdown(display_text)
 
+        # ---------- WASTE ----------
         elif image_status == "WASTE":
 
             with st.container(border=True):
@@ -506,20 +582,25 @@ if uploaded_file is not None:
 
             with impact_cols[2]:
                 st.metric(
-                    "Next step",
-                    "Sort & check",
+                    "Reuse ideas",
+                    "Included",
                 )
 
             st.caption(
-                "Categories are identified from AI-generated guidance. "
-                "Individual objects and environmental savings are not measured."
+                "Categories are inferred from AI-generated guidance. "
+                "Actual recycling eligibility depends on local facilities. "
+                "Environmental savings are not measured."
             )
 
+        # ---------- Invalid Status ----------
         else:
             st.warning(
-                "The AI response did not begin with a recognized image status. "
-                "Please analyze the image again."
+                "The AI response did not begin with a recognized image "
+                "status. Please analyze the image again."
             )
+
+            with st.expander("View model response"):
+                st.text(result_text)
 
     # ---------- Error Display ----------
     if st.session_state.get("analysis_error"):
@@ -540,7 +621,7 @@ st.markdown(
     <div style="text-align:center; padding:1rem; color:#64748b;">
         <strong style="color:#166534;">EcoSort AI ♻️</strong>
         <br>
-        Built for a cleaner, more sustainable future.
+        Identify. Reuse. Recycle. Build a greener future.
     </div>
     """,
     unsafe_allow_html=True,
